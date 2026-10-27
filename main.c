@@ -1,7 +1,7 @@
 /* ===========================================================
    main.c
    1 Pole - 4 Lamps
-   RS485 command based control with ACK
+   RS485 UART interrupt-driven control with packet protocol
    =========================================================== */
 
 #include "r_cg_macrodriver.h"
@@ -12,8 +12,7 @@
    1-pole, 4-lamp arrangement driven from low-side outputs.
    Update these GPIO mappings if the board uses different pins.
    ----------------------------------------------------------- */
-
-#define DRIVER_ACTIVE_LOW     1   /* 1 = active low driver, 0 = active high driver */
+#define DRIVER_ACTIVE_LOW     1u
 
 #define LAMP1   P0_bit.no0
 #define LAMP2   P0_bit.no1
@@ -24,19 +23,20 @@
 #define DEHIGH()    P1 |= (1u << 0)
 #define DELOW()     P1 &= ~(1u << 0)
 
-/* UART buffers */
-volatile uint8_t UART_RX_D1[1];
-volatile uint8_t UART_TX_D1[2];
-
-/* External UART variables used by generated Renesas config */
-extern uint8_t a;
-extern uint8_t b;
-extern uint8_t d;
-extern uint8_t e;
-
 /* -----------------------------------------------------------
-   Command map for 1-pole, 4-lamp control
+   UART packet protocol
+   Frame: [SOF][ADDR][CMD][LEN][DATA...][CRC_L][CRC_H][EOF]
+   SOF = 0x7E
+   EOF = 0x0D
+   LEN = number of data bytes (0 for simple command packets)
+   CMD = command code defined below
+   CRC = 16-bit CRC-CCITT (optional but recommended)
    ----------------------------------------------------------- */
+#define SOF                 0x7E
+#define EOF                 0x0D
+#define RS485_ADDR          0x01
+#define RX_BUFFER_SIZE      32u
+
 #define CMD_ALL_OFF         0x00
 #define CMD_LAMP1_ON        0x01
 #define CMD_LAMP2_ON        0x02
@@ -51,10 +51,24 @@ extern uint8_t e;
 #define CMD_RED_AMBER_ON    0x0B
 #define CMD_GREEN_ON        0x0C
 #define CMD_TRAFFIC_RUN     0x0D
-#define CMD_STOP           0x0E
+#define CMD_STOP            0x0E
 
 #define ACK_VALID           0xAA
 #define ACK_INVALID         0x55
+
+/* UART buffers */
+volatile uint8_t UART_RX_D1[1];
+volatile uint8_t UART_TX_D1[2];
+volatile uint8_t rxBuffer[RX_BUFFER_SIZE];
+volatile uint8_t rxIndex = 0;
+volatile uint8_t packetReady = 0;
+volatile uint8_t lastCommand = 0;
+
+/* External UART variables used by generated Renesas config */
+extern uint8_t a;
+extern uint8_t b;
+extern uint8_t d;
+extern uint8_t e;
 
 /* -----------------------------------------------------------
    Delay function
@@ -75,9 +89,9 @@ void setLamp(uint8_t lamp, uint8_t state)
 {
     uint8_t outputState;
 
-    if (DRIVER_ACTIVE_LOW == 1)
+    if (DRIVER_ACTIVE_LOW == 1u)
     {
-        outputState = (state == 0) ? 1u : 0u;
+        outputState = (state == 0u) ? 1u : 0u;
     }
     else
     {
@@ -120,11 +134,6 @@ void allLampsOff(void)
 
 /* -----------------------------------------------------------
    Traffic sequence for 1 pole - 4 lamps
-   Lamp mapping:
-   1 = RED
-   2 = AMBER
-   3 = GREEN 1
-   4 = GREEN 2
    ----------------------------------------------------------- */
 void trafficSequence(void)
 {
@@ -152,29 +161,36 @@ void trafficSequence(void)
 }
 
 /* -----------------------------------------------------------
-   RS485 receive
+   CRC-CCITT helper functions
+   CRC = 0x1021
    ----------------------------------------------------------- */
-void UART_RX(void)
+uint16_t crc16_ccitt(uint8_t *data, uint8_t length)
 {
-    while (d == 0)
-    {
-        R_Config_UART2_Receive(UART_RX_D1, 1);
-    }
-    d = 0;
+    uint16_t crc = 0xFFFFu;
+    uint8_t i;
+    uint8_t j;
 
-    while (b == 0)
+    for (i = 0; i < length; i++)
     {
-        /* wait until receive complete */
+        crc ^= (uint16_t)data[i];
+        for (j = 0; j < 8; j++)
+        {
+            if ((crc & 0x8000u) != 0u)
+            {
+                crc = (uint16_t)((crc << 1) ^ 0x1021u);
+            }
+            else
+            {
+                crc <<= 1;
+            }
+        }
     }
 
-    b = 0;
-    a = 0;
+    return crc;
 }
 
 /* -----------------------------------------------------------
    RS485 transmit ACK
-   valid command -> 0xAA
-   invalid command -> 0x55
    ----------------------------------------------------------- */
 void UART_SEND_ACK(uint8_t ackByte)
 {
@@ -195,7 +211,7 @@ void UART_SEND_ACK(uint8_t ackByte)
 }
 
 /* -----------------------------------------------------------
-   Process RS485 command
+   Process command
    ----------------------------------------------------------- */
 void processCommand(uint8_t cmd)
 {
@@ -314,6 +330,92 @@ void processCommand(uint8_t cmd)
 }
 
 /* -----------------------------------------------------------
+   RX interrupt handler hook
+   This function is called from the generated UART ISR when a byte
+   is received. It buffers bytes and detects a complete packet.
+   ----------------------------------------------------------- */
+void UART2_Receive_ISR(uint8_t rxByte)
+{
+    static uint8_t inFrame = 0;
+    static uint8_t frameLength = 0;
+    static uint8_t crcHi = 0;
+    static uint8_t crcLo = 0;
+
+    if (rxByte == SOF)
+    {
+        rxIndex = 0;
+        inFrame = 1;
+        frameLength = 0;
+        crcHi = 0;
+        crcLo = 0;
+        return;
+    }
+
+    if (inFrame == 0u)
+    {
+        return;
+    }
+
+    if (rxIndex >= RX_BUFFER_SIZE)
+    {
+        rxIndex = 0;
+        inFrame = 0;
+        return;
+    }
+
+    rxBuffer[rxIndex++] = rxByte;
+
+    if (rxByte == EOF)
+    {
+        if (rxIndex >= 6u)
+        {
+            uint8_t packetAddr = rxBuffer[1];
+            uint8_t packetCmd = rxBuffer[2];
+            uint8_t packetLen = rxBuffer[3];
+            uint16_t crcReceived;
+            uint16_t crcCalc;
+
+            if ((packetAddr == RS485_ADDR) || (packetAddr == 0xFFu))
+            {
+                if (packetLen == 0u)
+                {
+                    crcReceived = (uint16_t)((uint16_t)rxBuffer[rxIndex - 3] << 8) |
+                                  (uint16_t)rxBuffer[rxIndex - 2];
+
+                    crcCalc = crc16_ccitt(&rxBuffer[1], (uint8_t)(rxIndex - 4));
+
+                    if (crcReceived == crcCalc)
+                    {
+                        lastCommand = packetCmd;
+                        packetReady = 1u;
+                    }
+                }
+            }
+        }
+
+        inFrame = 0;
+        rxIndex = 0;
+    }
+}
+
+/* -----------------------------------------------------------
+   Packet decoder for interrupt-driven RS485 communication
+   Packet structure:
+   SOF, ADDR, CMD, LEN, DATA, CRC_HI, CRC_LO, EOF
+   For simple command-only frames, LEN = 0 and DATA is absent.
+   ----------------------------------------------------------- */
+void handlePacket(void)
+{
+    if (packetReady == 0u)
+    {
+        return;
+    }
+
+    packetReady = 0u;
+    processCommand(lastCommand);
+}
+
+/* -----------------------------------------------------------
    Main
    ----------------------------------------------------------- */
 void main(void)
@@ -333,7 +435,6 @@ void main(void)
 
     while (1U)
     {
-        UART_RX();
-        processCommand(UART_RX_D1[0]);
+        handlePacket();
     }
 }
