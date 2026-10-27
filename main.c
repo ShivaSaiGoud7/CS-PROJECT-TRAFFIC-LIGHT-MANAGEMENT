@@ -9,10 +9,8 @@
 #include "Config_UART2.h"
 
 /* -----------------------------------------------------------
-   IMPORTANT:
-   Replace these GPIO definitions with the actual MCU pins used on
-   your board. For now, this version is written for a 1-pole,
-   4-lamp arrangement driven from low-side outputs.
+   1-pole, 4-lamp arrangement driven from low-side outputs.
+   Update these GPIO mappings if the board uses different pins.
    ----------------------------------------------------------- */
 
 #define DRIVER_ACTIVE_LOW     1   /* 1 = active low driver, 0 = active high driver */
@@ -35,6 +33,28 @@ extern uint8_t a;
 extern uint8_t b;
 extern uint8_t d;
 extern uint8_t e;
+
+/* -----------------------------------------------------------
+   Command map for 1-pole, 4-lamp control
+   ----------------------------------------------------------- */
+#define CMD_ALL_OFF         0x00
+#define CMD_LAMP1_ON        0x01
+#define CMD_LAMP2_ON        0x02
+#define CMD_LAMP3_ON        0x03
+#define CMD_LAMP4_ON        0x04
+#define CMD_LAMP1_OFF       0x05
+#define CMD_LAMP2_OFF       0x06
+#define CMD_LAMP3_OFF       0x07
+#define CMD_LAMP4_OFF       0x08
+#define CMD_LAMP1_2_ON      0x09
+#define CMD_LAMP3_4_ON      0x0A
+#define CMD_RED_AMBER_ON    0x0B
+#define CMD_GREEN_ON        0x0C
+#define CMD_TRAFFIC_RUN     0x0D
+#define CMD_STOP           0x0E
+
+#define ACK_VALID           0xAA
+#define ACK_INVALID         0x55
 
 /* -----------------------------------------------------------
    Delay function
@@ -176,49 +196,29 @@ void UART_SEND_ACK(uint8_t ackByte)
 
 /* -----------------------------------------------------------
    Process RS485 command
-   Valid commands:
-   0x00 = all off
-   0x01 = lamp1 on
-   0x02 = lamp2 on
-   0x03 = lamp3 on
-   0x04 = lamp4 on
-   0x05 = lamp1 off
-   0x06 = lamp2 off
-   0x07 = lamp3 off
-   0x08 = lamp4 off
-   0x09 = lamp1 + lamp2 on
-   0x0A = lamp3 + lamp4 on
-   0x0B = red + amber on
-   0x0C = green1 + green2 on
-   0x0D = run traffic sequence
-   0x0E = stop / all off
-
-   ACK:
-   0xAA = valid command
-   0x55 = invalid command
    ----------------------------------------------------------- */
 void processCommand(uint8_t cmd)
 {
-    uint8_t ack = 0x55;
+    uint8_t ack = ACK_INVALID;
     uint8_t valid = 0;
 
     switch (cmd)
     {
-        case 0x00:
-        case 0x01:
-        case 0x02:
-        case 0x03:
-        case 0x04:
-        case 0x05:
-        case 0x06:
-        case 0x07:
-        case 0x08:
-        case 0x09:
-        case 0x0A:
-        case 0x0B:
-        case 0x0C:
-        case 0x0D:
-        case 0x0E:
+        case CMD_ALL_OFF:
+        case CMD_LAMP1_ON:
+        case CMD_LAMP2_ON:
+        case CMD_LAMP3_ON:
+        case CMD_LAMP4_ON:
+        case CMD_LAMP1_OFF:
+        case CMD_LAMP2_OFF:
+        case CMD_LAMP3_OFF:
+        case CMD_LAMP4_OFF:
+        case CMD_LAMP1_2_ON:
+        case CMD_LAMP3_4_ON:
+        case CMD_RED_AMBER_ON:
+        case CMD_GREEN_ON:
+        case CMD_TRAFFIC_RUN:
+        case CMD_STOP:
             valid = 1;
             break;
 
@@ -231,75 +231,75 @@ void processCommand(uint8_t cmd)
     {
         switch (cmd)
         {
-            case 0x00:
+            case CMD_ALL_OFF:
                 allLampsOff();
                 break;
 
-            case 0x01:
+            case CMD_LAMP1_ON:
                 allLampsOff();
                 setLamp(1, 1);
                 break;
 
-            case 0x02:
+            case CMD_LAMP2_ON:
                 allLampsOff();
                 setLamp(2, 1);
                 break;
 
-            case 0x03:
+            case CMD_LAMP3_ON:
                 allLampsOff();
                 setLamp(3, 1);
                 break;
 
-            case 0x04:
+            case CMD_LAMP4_ON:
                 allLampsOff();
                 setLamp(4, 1);
                 break;
 
-            case 0x05:
+            case CMD_LAMP1_OFF:
                 setLamp(1, 0);
                 break;
 
-            case 0x06:
+            case CMD_LAMP2_OFF:
                 setLamp(2, 0);
                 break;
 
-            case 0x07:
+            case CMD_LAMP3_OFF:
                 setLamp(3, 0);
                 break;
 
-            case 0x08:
+            case CMD_LAMP4_OFF:
                 setLamp(4, 0);
                 break;
 
-            case 0x09:
+            case CMD_LAMP1_2_ON:
                 allLampsOff();
                 setLamp(1, 1);
                 setLamp(2, 1);
                 break;
 
-            case 0x0A:
+            case CMD_LAMP3_4_ON:
                 allLampsOff();
                 setLamp(3, 1);
                 setLamp(4, 1);
                 break;
 
-            case 0x0B:
+            case CMD_RED_AMBER_ON:
                 allLampsOff();
                 setLamp(1, 1);
                 setLamp(2, 1);
                 break;
 
-            case 0x0C:
+            case CMD_GREEN_ON:
                 allLampsOff();
                 setLamp(3, 1);
                 setLamp(4, 1);
                 break;
 
-            case 0x0D:
+            case CMD_TRAFFIC_RUN:
                 trafficSequence();
                 break;
 
-            case 0x0E:
+            case CMD_STOP:
                 allLampsOff();
                 break;
 
@@ -307,7 +307,7 @@ void processCommand(uint8_t cmd)
                 break;
         }
 
-        ack = 0xAA;
+        ack = ACK_VALID;
     }
 
     UART_SEND_ACK(ack);
